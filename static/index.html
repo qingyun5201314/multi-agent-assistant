@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多功能AI助手</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>🤖 AI助手</h1>
+                <p>RAG + Agent</p>
+            </div>
+            
+            <div class="panel">
+                <h3>📚 知识库</h3>
+                <button id="loadKnowledge" class="btn">加载 knowledge.txt</button>
+                <div id="knowledgeStats" class="stats">未加载</div>
+            </div>
+            
+            <div class="panel">
+                <h3>⚙️ 设置</h3>
+                <label>
+                    最大步数
+                    <input type="number" id="maxSteps" value="5" min="1" max="10">
+                </label>
+            </div>
+            
+            <div class="panel">
+                <h3>💡 示例问题</h3>
+                <button class="example" data-q="北京天气怎么样？">北京天气怎么样？</button>
+                <button class="example" data-q="什么是RAG？">什么是RAG？</button>
+                <button class="example" data-q="123*456等于多少，然后告诉我现在时间">123*456 + 时间</button>
+                <button class="example" data-q="2026年AI有什么新进展？">2026年AI新进展</button>
+                <button class="example" data-q="帮我画一只赛博朋克风格的猫">🎨 画赛博朋克猫</button>
+            </div>
+            
+            <button id="clearChat" class="btn btn-danger">清空对话</button>
+        </aside>
+        
+        <!-- 主聊天区 -->
+        <main class="chat-area">
+            <div id="chatMessages" class="messages">
+                <div class="welcome">
+                    <h2>👋 你好！我是多功能AI助手</h2>
+                    <p>我可以：</p>
+                    <ul>
+                        <li>📚 基于知识库回答问题（RAG）</li>
+                        <li>🌤️ 查询实时天气</li>
+                        <li>🧮 进行数学计算</li>
+                        <li>⏰ 查询时间</li>
+                        <li>🔍 搜索互联网信息</li>
+                    </ul>
+                    <p>直接在下方输入问题开始吧！</p>
+                </div>
+            </div>
+            
+            <div class="input-area">
+                <textarea id="userInput" placeholder="输入你的问题...（按 Enter 发送，Shift+Enter 换行）"></textarea>
+                <button id="sendBtn" class="btn btn-send">发送</button>
+            </div>
+        </main>
+    </div>
+    
+    <script src="/static/script.js"></script>
+</body>
+</html>
