@@ -4,7 +4,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.104-green)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+![License](https://img.shields.io/badge/License-BSD--3--Clause-blue)
 
 ## 📸 功能演示
 
@@ -77,13 +77,29 @@ OPENAI_MODEL=deepseek-chat
 MODELSCOPE_TOKEN=你的魔搭token
 ```
 
-### 4. 启动服务
+**说明**：
+- `OPENAI_API_KEY`：支持 DeepSeek、Qwen、GLM 等任何 OpenAI 兼容 API
+- `MODELSCOPE_TOKEN`：用于图像生成，在 [ModelScope](https://www.modelscope.cn) 注册获取
+
+### 4. 准备知识库（可选）
+
+在项目根目录创建 `knowledge.txt`，每段之间用**空行**分隔：
+
+```
+Python是一种高级编程语言，由Guido van Rossum于1991年创建。
+
+机器学习是人工智能的一个分支，通过算法让计算机从数据中学习规律。
+
+RAG（检索增强生成）是一种结合信息检索和文本生成的技术。
+```
+
+### 5. 启动服务
 
 ```bash
 python main.py
 ```
 
-### 5. 访问
+### 6. 访问
 
 - **Web界面**: http://localhost:8000
 - **API文档**: http://localhost:8000/docs
@@ -97,7 +113,7 @@ multi-agent/
 ├── vector_db.py         # 向量数据库（FAISS + 语义分块）
 ├── tools.py             # 工具集（6个工具）
 ├── config.py            # 配置中心
-├── knowledge.txt        # 示例知识库
+├── knowledge.txt        # 示例知识库（需自建）
 ├── static/              # 前端文件
 │   ├── index.html
 │   ├── style.css
@@ -105,6 +121,8 @@ multi-agent/
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
+├── Dockerfile
+├── docker-compose.yml
 └── README.md
 ```
 
@@ -140,18 +158,22 @@ sentences = re.split(r'(?<=[。！？；.!?;])', text)
 
 Agent 通过提示词规则决定用哪个工具：
 
-- 概念问题 → `search_knowledge`
-- 实时信息 → `web_search`
-- 数学计算 → `calculate`
-- 画图 → `generate_image`
+| 问题类型 | 调用工具 |
+|---------|---------|
+| 概念解释 | `search_knowledge` |
+| 实时信息 | `web_search` |
+| 数学计算 | `calculate` |
+| 时间查询 | `get_time` |
+| 天气查询 | `get_weather` |
+| 画图 | `generate_image` |
 
 ## 📊 项目亮点
 
-1. **多模态能力**：文本对话 + 图像生成，超越纯文本Agent
-2. **RAG语义分块**：按标点切分，保留语义完整性，比按字数切分精度更高
+1. **多模态能力**：文本对话 + 图像生成，超越纯文本 Agent
+2. **RAG 语义分块**：按标点切分，保留语义完整性，比按字数切分精度更高
 3. **异步架构**：FastAPI + async/await，支持并发请求
-4. **工具路由**：6个工具，Agent根据问题类型自动选择
-5. **错误处理**：网络超时、API限流、工具失败都有兜底
+4. **工具路由**：6 个工具，Agent 根据问题类型自动选择
+5. **错误处理**：网络超时、API 限流、工具失败都有兜底
 
 ## 🐛 踩坑记录
 
@@ -167,19 +189,16 @@ Agent 通过提示词规则决定用哪个工具：
 
 ## 🔮 后续计划
 
-- [ ] 加入多轮对话记忆（向量数据库存储历史）
-- [ ] 加入语音输入/输出
+- [ ] 加入多轮对话记忆（会话管理 + 历史上下文）
+- [ ] 支持多文件上传（PDF、Word、Markdown）
 - [ ] 加入重排（Rerank）优化检索质量
-- [ ] 部署到云服务器（Docker + Nginx）
 - [ ] 本地部署 Stable Diffusion（替代 API）
+- [ ] 部署到云服务器（Docker + Nginx）
 
 ## 📄 License
 
-MIT License
+BSD-3-Clause
 
 ## 👤 作者
 
-[你的名字]
-
-- GitHub: [@你的用户名](https://github.com/你的用户名)
-- Email: 你的邮箱
+- GitHub: [@qingyun5201314](https://github.com/qingyun5201314)
