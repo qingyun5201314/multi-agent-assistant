@@ -1,19 +1,10 @@
 import datetime
-import requests
+import httpx
 import base64
-import time
-from typing import Dict, Any
+import json
+from typing import Dict, Any, List
 from vector_db import VectorDB
 from config import Config
-
-# 尝试导入 webless
-try:
-    from webless import search
-    HAS_WEBLESS = True
-    print("✅ webless 已加载，网页搜索可用")
-except ImportError:
-    HAS_WEBLESS = False
-    print("⚠️ 未安装 webless，web_search 将使用模拟数据")
 
 
 class Tools:
@@ -22,43 +13,44 @@ class Tools:
     def __init__(self, vector_db: VectorDB):
         self.vector_db = vector_db
     
-    def get_weather(self, city: str) -> Dict:
+    # ==================== 天气 ====================
+    
+    async def get_weather(self, city: str) -> Dict:
         """查询真实天气（Open-Meteo API）"""
         try:
-            geo_resp = requests.get(
-                "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": city, "count": 1, "language": "zh", "format": "json"},
-                timeout=10
-            )
-            geo_data = geo_resp.json()
-            
-            if not geo_data.get("results"):
-                return {"error": f"未找到城市: {city}"}
-            
-            location = geo_data["results"][0]
-            
-            weather_resp = requests.get(
-                "https://api.open-meteo.com/v1/forecast",
-                params={
-                    "latitude": location["latitude"],
-                    "longitude": location["longitude"],
-                    "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
-                    "timezone": "auto"
-                },
-                timeout=10
-            )
-            current = weather_resp.json().get("current", {})
-            
-            return {
-                "city": location.get("name", city),
-                "country": location.get("country", ""),
-                "temperature": current.get("temperature_2m"),
-                "humidity": current.get("relative_humidity_2m"),
-                "condition": self._weather_code_to_text(current.get("weather_code", 0)),
-                "wind_speed": current.get("wind_speed_10m"),
-                "unit": "°C"
-            }
-        except requests.exceptions.Timeout:
+            async with httpx.AsyncClient(timeout=10) as client:
+                geo_resp = await client.get(
+                    "https://geocoding-api.open-meteo.com/v1/search",
+                    params={"name": city, "count": 1, "language": "zh", "format": "json"}
+                )
+                geo_data = geo_resp.json()
+                
+                if not geo_data.get("results"):
+                    return {"error": f"未找到城市: {city}"}
+                
+                location = geo_data["results"][0]
+                
+                weather_resp = await client.get(
+                    "https://api.open-meteo.com/v1/forecast",
+                    params={
+                        "latitude": location["latitude"],
+                        "longitude": location["longitude"],
+                        "current": "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
+                        "timezone": "auto"
+                    }
+                )
+                current = weather_resp.json().get("current", {})
+                
+                return {
+                    "city": location.get("name", city),
+                    "country": location.get("country", ""),
+                    "temperature": current.get("temperature_2m"),
+                    "humidity": current.get("relative_humidity_2m"),
+                    "condition": self._weather_code_to_text(current.get("weather_code", 0)),
+                    "wind_speed": current.get("wind_speed_10m"),
+                    "unit": "°C"
+                }
+        except httpx.TimeoutException:
             return {"error": "请求超时"}
         except Exception as e:
             return {"error": f"查询失败: {str(e)}"}
@@ -77,6 +69,8 @@ class Tools:
         }
         return weather_map.get(code, "未知")
     
+    # ==================== 计算 ====================
+    
     def calculate(self, expression: str) -> Dict:
         try:
             allowed = set("0123456789+-*/(). ")
@@ -87,6 +81,8 @@ class Tools:
         except Exception as e:
             return {"expression": expression, "error": str(e)}
     
+    # ==================== 时间 ====================
+    
     def get_time(self) -> Dict:
         now = datetime.datetime.now()
         return {
@@ -95,51 +91,69 @@ class Tools:
             "weekday": now.strftime("%A")
         }
     
+    # ==================== 知识库 ====================
+    
     def search_knowledge(self, query: str) -> Dict:
         results = self.vector_db.search(query, top_k=Config.TOP_K)
         if not results:
             return {"found": False, "message": "知识库为空或未找到相关文档"}
         return {"found": True, "count": len(results), "results": results}
     
+    # ==================== 网页搜索（Tavily API） ====================
+    
     async def web_search(self, query: str) -> Dict:
-        """真实网页搜索（webless，异步版）"""
-        if not HAS_WEBLESS:
-            return {
-                "query": query,
-                "note": "webless未安装，返回模拟数据",
-                "results": [
-                    {"title": f"关于'{query}'的结果1", "snippet": "..."},
-                    {"title": f"关于'{query}'的结果2", "snippet": "..."}
-                ]
-            }
-        
+        """网页搜索（Tavily API，专为AI设计）"""
         try:
             print(f"🔍 [调试] 开始搜索: {query}")
-            result = await search(query, limit=5)
-            print(f"🔍 [调试] 搜索返回: ok={result.ok}, hits={len(result.hits) if result.ok else 0}")
             
-            if not result.ok:
+            if not Config.TAVILY_API_KEY:
+                return {"error": "未配置 TAVILY_API_KEY"}
+            
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": Config.TAVILY_API_KEY,
+                        "query": query,
+                        "search_depth": "basic",  # basic 省额度，advanced 更慢但更准
+                        "max_results": 5,
+                        "include_answer": False,   # 不需要Tavily生成的答案
+                        "include_raw_content": False
+                    }
+                )
+                
+                print(f"🔍 [调试] Tavily返回状态: {resp.status_code}")
+                
+                if resp.status_code != 200:
+                    return {"error": f"Tavily返回 {resp.status_code}: {resp.text[:200]}"}
+                
+                data = resp.json()
+                results = data.get("results", [])
+                
+                print(f"🔍 [调试] Tavily返回 {len(results)} 条结果")
+                
                 return {
                     "query": query,
-                    "error": "所有搜索引擎请求失败",
-                    "failed_engines": result.failed
+                    "count": len(results),
+                    "results": [
+                        {
+                            "title": r.get("title", ""),
+                            "url": r.get("url", ""),
+                            "snippet": r.get("content", "")[:300]
+                        }
+                        for r in results[:5]
+                    ]
                 }
-            
-            return {
-                "query": query,
-                "count": len(result.hits),
-                "results": [
-                    {"title": hit.title, "url": hit.url, "snippet": hit.snippet}
-                    for hit in result.hits
-                ],
-                "succeeded_engines": result.succeeded
-            }
+        except httpx.TimeoutException:
+            return {"error": "搜索请求超时"}
         except Exception as e:
             print(f"❌ [调试] web_search异常: {type(e).__name__}: {e}")
             return {"error": f"搜索失败: {str(e)}"}
     
+    # ==================== 图像生成 ====================
+    
     async def generate_image(self, prompt: str) -> Dict:
-        """生成图像（ModelScope 魔搭社区，异步任务 + 轮询）"""
+        """生成图像（ModelScope）"""
         try:
             print(f"🎨 [调试] 开始生成图像: {prompt}")
             
@@ -149,112 +163,106 @@ class Tools:
             headers = {
                 "Authorization": f"Bearer {Config.MODELSCOPE_TOKEN}",
                 "Content-Type": "application/json",
-                "X-ModelScope-Async-Mode": "true"  # ← 关键：开启异步模式
+                "X-ModelScope-Async-Mode": "true"
             }
             
-            # Step 1: 创建生成任务
-            create_resp = requests.post(
-                "https://api-inference.modelscope.cn/v1/images/generations",
-                headers=headers,
-                json={
-                    "model": "Qwen/Qwen-Image",
-                    "prompt": prompt,
-                    "n": 1,
-                    "size": "1024x1024"
-                },
-                timeout=30
-            )
-            
-            print(f"🎨 [调试] 创建任务返回状态: {create_resp.status_code}")
-            
-            if create_resp.status_code != 200:
-                return {"success": False, "error": f"创建任务失败: {create_resp.text[:200]}"}
-            
-            create_data = create_resp.json()
-            task_id = create_data.get("task_id")
-            
-            if not task_id:
-                return {"success": False, "error": f"未获取到task_id: {create_data}"}
-            
-            print(f"🎨 [调试] 任务已创建: {task_id}")
-            
-            # Step 2: 轮询查询任务结果（最多等60秒）
-            query_headers = {
-                "Authorization": f"Bearer {Config.MODELSCOPE_TOKEN}",
-                "X-ModelScope-Task-Type": "image_generation"
-            }
-            
-            max_wait = 60
-            poll_interval = 3
-            elapsed = 0
-            
-            while elapsed < max_wait:
-                time.sleep(poll_interval)
-                elapsed += poll_interval
-                
-                query_resp = requests.get(
-                    f"https://api-inference.modelscope.cn/v1/tasks/{task_id}",
-                    headers=query_headers,
-                    timeout=15
+            async with httpx.AsyncClient(timeout=90) as client:
+                # Step 1: 创建任务
+                create_resp = await client.post(
+                    "https://api-inference.modelscope.cn/v1/images/generations",
+                    headers=headers,
+                    json={
+                        "model": "Qwen/Qwen-Image",
+                        "prompt": prompt,
+                        "n": 1,
+                        "size": "1024x1024"
+                    }
                 )
                 
-                if query_resp.status_code != 200:
-                    print(f"⚠️ [调试] 查询失败: {query_resp.status_code}")
-                    continue
+                if create_resp.status_code != 200:
+                    return {"success": False, "error": f"创建任务失败: {create_resp.text[:200]}"}
                 
-                query_data = query_resp.json()
-                status = query_data.get("task_status")
+                create_data = create_resp.json()
+                task_id = create_data.get("task_id")
                 
-                print(f"🎨 [调试] 任务状态: {status} (已等待{elapsed}秒)")
+                if not task_id:
+                    return {"success": False, "error": f"未获取到task_id: {create_data}"}
                 
-                if status == "SUCCEED":
-                    # 提取图片URL
-                    output_images = query_data.get("output_images", [])
-                    if output_images:
-                        image_url = output_images[0]
-                        print(f"🎨 [调试] 图像URL: {image_url}")
-                        
-                        # 下载图片转base64（避免前端加载外链超时）
-                        img_resp = requests.get(image_url, timeout=30)
-                        if img_resp.status_code == 200:
-                            img_base64 = base64.b64encode(img_resp.content).decode('utf-8')
-                            return {
-                                "success": True,
-                                "prompt": prompt,
-                                "image_url": f"data:image/png;base64,{img_base64}",
-                                "note": "图像已生成"
-                            }
+                print(f"🎨 [调试] 任务已创建: {task_id}")
+                
+                # Step 2: 轮询
+                query_headers = {
+                    "Authorization": f"Bearer {Config.MODELSCOPE_TOKEN}",
+                    "X-ModelScope-Task-Type": "image_generation"
+                }
+                
+                max_wait = 60
+                poll_interval = 3
+                elapsed = 0
+                
+                while elapsed < max_wait:
+                    import asyncio
+                    await asyncio.sleep(poll_interval)
+                    elapsed += poll_interval
+                    
+                    query_resp = await client.get(
+                        f"https://api-inference.modelscope.cn/v1/tasks/{task_id}",
+                        headers=query_headers
+                    )
+                    
+                    if query_resp.status_code != 200:
+                        continue
+                    
+                    query_data = query_resp.json()
+                    status = query_data.get("task_status")
+                    
+                    print(f"🎨 [调试] 任务状态: {status} (已等待{elapsed}秒)")
+                    
+                    if status == "SUCCEED":
+                        output_images = query_data.get("output_images", [])
+                        if output_images:
+                            image_url = output_images[0]
+                            
+                            # 下载图片转base64
+                            img_resp = await client.get(image_url, timeout=30)
+                            if img_resp.status_code == 200:
+                                img_base64 = base64.b64encode(img_resp.content).decode('utf-8')
+                                return {
+                                    "success": True,
+                                    "prompt": prompt,
+                                    "image_url": f"data:image/png;base64,{img_base64}",
+                                    "note": "图像已生成"
+                                }
+                            else:
+                                return {
+                                    "success": True,
+                                    "prompt": prompt,
+                                    "image_url": image_url,
+                                    "note": "图像已生成"
+                                }
                         else:
-                            # 下载失败就直接返回外链
-                            return {
-                                "success": True,
-                                "prompt": prompt,
-                                "image_url": image_url,
-                                "note": "图像已生成"
-                            }
-                    else:
-                        return {"success": False, "error": f"任务成功但无图片: {query_data}"}
+                            return {"success": False, "error": f"任务成功但无图片: {query_data}"}
+                    
+                    elif status == "FAILED":
+                        return {"success": False, "error": f"任务失败: {query_data}"}
                 
-                elif status == "FAILED":
-                    return {"success": False, "error": f"任务失败: {query_data}"}
-                
-                # PROCESSING / PENDING → 继续轮询
-            
-            return {"success": False, "error": "生成超时（60秒），请重试"}
+                return {"success": False, "error": "生成超时（60秒）"}
         
-        except requests.exceptions.Timeout:
-            return {"success": False, "error": "请求超时，请重试"}
+        except httpx.TimeoutException:
+            return {"success": False, "error": "请求超时"}
         except Exception as e:
             print(f"❌ [调试] generate_image异常: {type(e).__name__}: {e}")
             return {"success": False, "error": f"生成失败: {str(e)}"}
     
+    # ==================== 统一执行入口 ====================
+    
     async def execute(self, tool_name: str, args: str) -> Any:
-        """统一执行入口（异步）"""
+        """统一执行入口"""
         try:
             args = args.strip().strip('"').strip("'")
             
             if tool_name == "get_weather":
-                return self.get_weather(args)
+                return await self.get_weather(args)
             elif tool_name == "calculate":
                 return self.calculate(args)
             elif tool_name == "get_time":

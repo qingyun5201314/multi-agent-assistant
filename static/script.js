@@ -5,19 +5,142 @@ const userInput = document.getElementById('userInput');
 const sendBtn = document.getElementById('sendBtn');
 const loadKnowledgeBtn = document.getElementById('loadKnowledge');
 const knowledgeStats = document.getElementById('knowledgeStats');
-const clearChatBtn = document.getElementById('clearChat');
 const maxStepsInput = document.getElementById('maxSteps');
+const sessionList = document.getElementById('sessionList');
+const newChatBtn = document.getElementById('newChatBtn');
+
+// ==================== 会话管理 ====================
+let currentSessionId = null;
+
+function generateSessionId() {
+    return 'sess_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// ==================== 加载会话列表 ====================
+async function loadSessionList() {
+    try {
+        const response = await fetch(`${API_BASE}/sessions`);
+        const data = await response.json();
+        
+        sessionList.innerHTML = '';
+        
+        if (data.sessions.length === 0) {
+            sessionList.innerHTML = '<div class="empty-hint">暂无对话</div>';
+            return;
+        }
+        
+        data.sessions.forEach(session => {
+            const item = document.createElement('div');
+            item.className = 'session-item';
+            if (session.session_id === currentSessionId) {
+                item.classList.add('active');
+            }
+            
+            item.innerHTML = `
+                <div class="session-title">${session.title || '新对话'}</div>
+                <button class="session-delete" title="删除">×</button>
+            `;
+            
+            item.querySelector('.session-title').addEventListener('click', () => {
+                switchSession(session.session_id);
+            });
+            
+            item.querySelector('.session-delete').addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm('确定删除这个对话吗？')) {
+                    deleteSession(session.session_id);
+                }
+            });
+            
+            sessionList.appendChild(item);
+        });
+    } catch (error) {
+        console.error('加载会话列表失败:', error);
+    }
+}
+
+// ==================== 切换会话 ====================
+async function switchSession(sessionId) {
+    currentSessionId = sessionId;
+    
+    try {
+        const response = await fetch(`${API_BASE}/sessions/${sessionId}/messages`);
+        const data = await response.json();
+        
+        chatMessages.innerHTML = '';
+        
+        if (data.messages.length === 0) {
+            chatMessages.innerHTML = `
+                <div class="welcome">
+                    <h2>👋 新对话</h2>
+                    <p>继续提问吧！</p>
+                </div>
+            `;
+        } else {
+            data.messages.forEach(msg => {
+                addMessage(msg.role, msg.content, false, null, false);
+            });
+            
+            // 滚动到底部（简单版）
+            setTimeout(() => {
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }, 100);
+        }
+        
+        loadSessionList();
+    } catch (error) {
+        console.error('加载会话消息失败:', error);
+    }
+}
+
+// ==================== 新对话 ====================
+async function newChat() {
+    currentSessionId = generateSessionId();
+    
+    chatMessages.innerHTML = `
+        <div class="welcome">
+            <h2>👋 新对话</h2>
+            <p>开始提问吧！</p>
+        </div>
+    `;
+    
+    await loadSessionList();
+}
+
+// ==================== 删除会话 ====================
+async function deleteSession(sessionId) {
+    try {
+        await fetch(`${API_BASE}/sessions/${sessionId}`, {
+            method: 'DELETE'
+        });
+        
+        if (sessionId === currentSessionId) {
+            await newChat();
+        } else {
+            await loadSessionList();
+        }
+    } catch (error) {
+        console.error('删除失败:', error);
+    }
+}
 
 // ==================== 发送消息 ====================
 async function sendMessage() {
     const query = userInput.value.trim();
     if (!query) return;
     
+    if (!currentSessionId) {
+        currentSessionId = generateSessionId();
+    }
+    
     userInput.value = '';
     sendBtn.disabled = true;
     sendBtn.textContent = '思考中';
     
-    addMessage('user', query);
+    const welcome = chatMessages.querySelector('.welcome');
+    if (welcome) welcome.remove();
+    
+    addMessage('user', query, false, null, true);
     const loadingEl = addMessage('assistant', '🤔 思考中...', true);
     
     try {
@@ -26,6 +149,7 @@ async function sendMessage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 query: query,
+                session_id: currentSessionId,
                 max_steps: parseInt(maxStepsInput.value) || 5
             })
         });
@@ -34,7 +158,8 @@ async function sendMessage() {
         loadingEl.remove();
         
         if (data.success) {
-            addMessage('assistant', data.answer, false, data.steps);
+            addMessage('assistant', data.answer, false, data.steps, true);
+            await loadSessionList();
         } else {
             addMessage('assistant', `❌ 出错了: ${data.error || '未知错误'}`);
         }
@@ -49,7 +174,7 @@ async function sendMessage() {
 }
 
 // ==================== 添加消息到界面 ====================
-function addMessage(role, content, isLoading = false, steps = null) {
+function addMessage(role, content, isLoading = false, steps = null, scroll = true) {
     const msg = document.createElement('div');
     msg.className = `message ${role}`;
     
@@ -59,7 +184,6 @@ function addMessage(role, content, isLoading = false, steps = null) {
         msg.textContent = content;
     }
     
-    // 处理工具调用步骤
     if (steps && steps.length > 0) {
         const stepsEl = document.createElement('details');
         stepsEl.className = 'steps';
@@ -75,13 +199,12 @@ function addMessage(role, content, isLoading = false, steps = null) {
             if (step.action === 'tool') {
                 item.innerHTML = `<strong>Step ${step.step}:</strong> 调用 <code>${step.tool}(${step.args})</code>`;
                 
-                // ⭐ 关键：如果生成了图片，显示出来
                 if (step.tool === 'generate_image' && step.result && step.result.image_url) {
                     const imgContainer = document.createElement('div');
                     imgContainer.style.marginTop = '10px';
                     
                     const loadingText = document.createElement('div');
-                    loadingText.textContent = '🎨 图像生成中，请稍候（5-15秒）...';
+                    loadingText.textContent = '🎨 图像生成中，请稍候...';
                     loadingText.style.fontSize = '12px';
                     loadingText.style.color = '#78350f';
                     
@@ -92,15 +215,13 @@ function addMessage(role, content, isLoading = false, steps = null) {
                     img.style.borderRadius = '8px';
                     img.style.display = 'none';
                     
-                    // 图片加载完成后显示
                     img.onload = () => {
                         loadingText.remove();
                         img.style.display = 'block';
                     };
                     
-                    // 图片加载失败
                     img.onerror = () => {
-                        loadingText.textContent = '❌ 图像加载失败，请重试';
+                        loadingText.textContent = '❌ 图像加载失败';
                         loadingText.style.color = '#dc2626';
                     };
                     
@@ -119,7 +240,11 @@ function addMessage(role, content, isLoading = false, steps = null) {
     }
     
     chatMessages.appendChild(msg);
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    
+    if (scroll) {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+    
     return msg;
 }
 
@@ -139,7 +264,7 @@ async function loadKnowledge() {
         
         if (response.ok) {
             await updateStats();
-            addMessage('assistant', '✅ 知识库加载成功！现在可以问关于知识库的问题了。');
+            addMessage('assistant', '✅ 知识库加载成功！');
         } else {
             addMessage('assistant', `❌ 加载失败: ${data.detail || '未知错误'}`);
         }
@@ -162,16 +287,6 @@ async function updateStats() {
     }
 }
 
-// ==================== 清空对话 ====================
-function clearChat() {
-    chatMessages.innerHTML = `
-        <div class="welcome">
-            <h2>👋 你好！我是多功能AI助手</h2>
-            <p>对话已清空，继续提问吧！</p>
-        </div>
-    `;
-}
-
 // ==================== 事件绑定 ====================
 sendBtn.addEventListener('click', sendMessage);
 
@@ -183,13 +298,10 @@ userInput.addEventListener('keydown', (e) => {
 });
 
 loadKnowledgeBtn.addEventListener('click', loadKnowledge);
-clearChatBtn.addEventListener('click', clearChat);
+newChatBtn.addEventListener('click', newChat);
 
-document.querySelectorAll('.example').forEach(btn => {
-    btn.addEventListener('click', () => {
-        userInput.value = btn.dataset.q;
-        userInput.focus();
-    });
+// ==================== 页面加载 ====================
+window.addEventListener('load', async () => {
+    await updateStats();
+    await loadSessionList();
 });
-
-window.addEventListener('load', updateStats);

@@ -15,11 +15,10 @@ from config import Config
 
 app = FastAPI(
     title="多功能AI助手",
-    description="RAG + Agent 综合助手 API",
-    version="1.0.0"
+    description="RAG + Agent + 记忆 + 多会话",
+    version="1.2.0"
 )
 
-# 跨域
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,16 +26,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 挂载静态文件夹
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# 全局Agent实例
 agent = Agent()
 
 # ==================== 请求/响应模型 ====================
 
 class ChatRequest(BaseModel):
     query: str
+    session_id: Optional[str] = "default"
     max_steps: Optional[int] = 5
 
 class StepInfo(BaseModel):
@@ -51,16 +49,19 @@ class ChatResponse(BaseModel):
     success: bool
     answer: str
     steps: List[StepInfo]
+    session_id: str
     error: Optional[str] = None
 
 class LoadRequest(BaseModel):
     filepath: str
 
+class SessionRequest(BaseModel):
+    session_id: str
+
 # ==================== 接口 ====================
 
 @app.get("/")
 async def index():
-    """首页：返回前端页面"""
     return FileResponse("static/index.html")
 
 @app.get("/health")
@@ -69,18 +70,59 @@ async def health():
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """核心聊天接口"""
     try:
         agent.max_steps = request.max_steps
-        result = await agent.run(request.query)
+        result = await agent.run(request.query, session_id=request.session_id)
         
         return ChatResponse(
             success=True,
             answer=result["answer"],
-            steps=result["steps"]
+            steps=result["steps"],
+            session_id=result["session_id"]
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ==================== 多会话管理 ====================
+
+@app.get("/sessions")
+async def list_sessions():
+    """获取所有会话列表"""
+    return {"sessions": agent.get_all_sessions()}
+
+@app.get("/sessions/{session_id}/messages")
+async def get_session_messages(session_id: str):
+    """获取某个会话的所有消息"""
+    return {"messages": agent.get_session_messages(session_id)}
+
+@app.post("/sessions/clear")
+async def clear_session(request: SessionRequest):
+    """清空某个会话的消息（保留会话）"""
+    agent.clear_session(request.session_id)
+    return {"success": True, "message": f"会话 {request.session_id} 已清空"}
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """删除某个会话"""
+    agent.delete_session(session_id)
+    return {"success": True, "message": f"会话 {session_id} 已删除"}
+
+# ==================== 记忆管理 ====================
+
+@app.get("/memory/stats")
+async def memory_stats():
+    return agent.get_memory_stats()
+
+@app.get("/memory/all")
+async def all_memories():
+    return {"memories": agent.get_all_memories()}
+
+@app.delete("/memory/clear")
+async def clear_long_term_memory():
+    agent.clear_long_term_memory()
+    return {"success": True, "message": "长期记忆已清空"}
+
+# ==================== 知识库管理 ====================
 
 @app.post("/knowledge/load")
 async def load_knowledge(request: LoadRequest):

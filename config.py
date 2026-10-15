@@ -12,6 +12,7 @@ class Config:
     BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
     MODEL = os.getenv("OPENAI_MODEL", "deepseek-chat")
     MODELSCOPE_TOKEN = os.getenv("MODELSCOPE_TOKEN", "")
+    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
     
     # 启动时校验
     if not API_KEY:
