@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Optional, Any
 import uvicorn
@@ -140,6 +141,47 @@ async def knowledge_stats():
 async def clear_knowledge():
     agent.vector_db.clear()
     return {"success": True, "message": "知识库已清空"}
+
+@app.post("/knowledge/upload")
+async def upload_knowledge(file: UploadFile = File(...)):
+    """上传文档到知识库"""
+    try:
+        # 检查文件类型
+        allowed_ext = ['.txt', '.md', '.markdown', '.pdf']
+        ext = os.path.splitext(file.filename)[1].lower()
+        
+        if ext not in allowed_ext:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"不支持的文件格式: {ext}，仅支持 {allowed_ext}"
+            )
+        
+        # 读取文件内容
+        content = await file.read()
+        
+        # 加载到知识库
+        success = agent.vector_db.load_from_bytes(content, file.filename)
+        
+        if success:
+            stats = agent.vector_db.get_stats()
+            return {
+                "success": True,
+                "message": f"已上传: {file.filename}",
+                "stats": stats
+            }
+        else:
+            raise HTTPException(status_code=400, detail="加载失败")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/knowledge/sources")
+async def knowledge_sources():
+    """获取已加载的文档源"""
+    return {"sources": agent.vector_db.get_sources()}
 
 # ==================== 启动 ====================
 

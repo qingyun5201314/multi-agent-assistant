@@ -305,3 +305,50 @@ window.addEventListener('load', async () => {
     await updateStats();
     await loadSessionList();
 });
+
+// ==================== 文件上传 ====================
+const uploadBtn = document.getElementById('uploadBtn');
+const fileInput = document.getElementById('fileInput');
+
+uploadBtn.addEventListener('click', () => {
+    fileInput.click();
+});
+
+fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    // 显示上传中
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = '⏳ 上传中...';
+    addMessage('assistant', `📎 正在上传并解析 ${file.name}...`);
+    
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        const response = await fetch(`${API_BASE}/knowledge/upload`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            await updateStats();
+            addMessage('assistant', 
+                `✅ 已上传 ${file.name}\n` +
+                `📄 当前知识库共 ${data.stats['文档数量']} 个文档块\n` +
+                `📚 来自 ${data.stats['文档源数量']} 个文件`
+            );
+        } else {
+            addMessage('assistant', `❌ 上传失败: ${data.detail || '未知错误'}`);
+        }
+    } catch (error) {
+        addMessage('assistant', `❌ 网络错误: ${error.message}`);
+    } finally {
+        uploadBtn.disabled = false;
+        uploadBtn.textContent = '📎 上传文档';
+        fileInput.value = '';  // 清空，允许重复上传同一文件
+    }
+});

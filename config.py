@@ -35,3 +35,15 @@ class Config:
     # ===== 服务参数 =====
     HOST = os.getenv("HOST", "0.0.0.0")
     PORT = int(os.getenv("PORT", "8000"))
+
+    # ===== 混合检索参数 =====
+    USE_HYBRID_SEARCH = os.getenv("USE_HYBRID_SEARCH", "true").lower() == "true"  # 是否启用混合检索
+    VECTOR_TOP_K = int(os.getenv("VECTOR_TOP_K", "5"))    # 向量检索取几条
+    BM25_TOP_K = int(os.getenv("BM25_TOP_K", "5"))        # BM25检索取几条
+    RRF_K = int(os.getenv("RRF_K", "60"))                 # RRF公式的k值
+    FINAL_TOP_K = int(os.getenv("FINAL_TOP_K", "3"))      # 最终返回几条
+
+    # ===== 重排参数 =====
+    USE_RERANK = os.getenv("USE_RERANK", "true").lower() == "true"  # 是否启用重排
+    RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "10"))   # 重排候选数量
+    RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "3"))              # 重排后保留几条
