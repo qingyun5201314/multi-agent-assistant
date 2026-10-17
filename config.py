@@ -47,3 +47,6 @@ class Config:
     USE_RERANK = os.getenv("USE_RERANK", "true").lower() == "true"  # 是否启用重排
     RERANK_CANDIDATES = int(os.getenv("RERANK_CANDIDATES", "10"))   # 重排候选数量
     RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "3"))              # 重排后保留几条
+
+    # ===== 上下文压缩参数 =====
+    USE_COMPRESSION = os.getenv("USE_COMPRESSION", "true").lower() == "true"

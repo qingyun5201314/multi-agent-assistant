@@ -93,8 +93,18 @@ class Tools:
     
     # ==================== 知识库 ====================
     
-    def search_knowledge(self, query: str) -> Dict:
-        results = self.vector_db.search(query, top_k=Config.TOP_K)
+    def search_knowledge(self, query: Any) -> Dict:
+        """
+        检索知识库
+        如果 query 是列表，说明传入了多路查询（原问题 + 改写词）
+        """
+        if isinstance(query, list):
+            queries = query
+        else:
+            queries = [query]
+            
+        results = self.vector_db.search_multi_query(queries, top_k=Config.TOP_K)
+        
         if not results:
             return {"found": False, "message": "知识库为空或未找到相关文档"}
         return {"found": True, "count": len(results), "results": results}
@@ -115,9 +125,9 @@ class Tools:
                     json={
                         "api_key": Config.TAVILY_API_KEY,
                         "query": query,
-                        "search_depth": "basic",  # basic 省额度，advanced 更慢但更准
+                        "search_depth": "basic",
                         "max_results": 5,
-                        "include_answer": False,   # 不需要Tavily生成的答案
+                        "include_answer": False,
                         "include_raw_content": False
                     }
                 )
@@ -150,7 +160,7 @@ class Tools:
             print(f"❌ [调试] web_search异常: {type(e).__name__}: {e}")
             return {"error": f"搜索失败: {str(e)}"}
     
-    # ==================== 图像生成 ====================
+    # ==================== 图像生成（ModelScope） ====================
     
     async def generate_image(self, prompt: str) -> Dict:
         """生成图像（ModelScope）"""
@@ -223,7 +233,6 @@ class Tools:
                         if output_images:
                             image_url = output_images[0]
                             
-                            # 下载图片转base64
                             img_resp = await client.get(image_url, timeout=30)
                             if img_resp.status_code == 200:
                                 img_base64 = base64.b64encode(img_resp.content).decode('utf-8')
@@ -256,10 +265,12 @@ class Tools:
     
     # ==================== 统一执行入口 ====================
     
-    async def execute(self, tool_name: str, args: str) -> Any:
+    async def execute(self, tool_name: str, args: Any) -> Any:
         """统一执行入口"""
         try:
-            args = args.strip().strip('"').strip("'")
+            # 如果参数是字符串（其他工具），做清理；如果是列表（知识库），直接传
+            if isinstance(args, str):
+                args = args.strip().strip('"').strip("'")
             
             if tool_name == "get_weather":
                 return await self.get_weather(args)

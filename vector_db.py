@@ -12,30 +12,26 @@ from config import Config
 
 
 class VectorDB:
-    """向量数据库（多格式 + 持久化 + 混合检索 + 重排）"""
+    """向量数据库（多格式 + 持久化 + 混合检索 + 重排 + 多路召回 + 上下文压缩）"""
     
     def __init__(self, model_name='all-MiniLM-L6-v2', persist_dir: str = "knowledge_db"):
         print("📦 加载向量模型...")
         self.encoder = SentenceTransformer(model_name)
         
-        # 持久化目录
         self.persist_dir = persist_dir
         os.makedirs(persist_dir, exist_ok=True)
         self.index_path = os.path.join(persist_dir, "index.faiss")
         self.data_path = os.path.join(persist_dir, "data.json")
         
-        # 内存数据
         self.documents: List[str] = []
         self.metadata: List[Dict] = []
         self.embeddings = None
         self.index = None
         self.bm25 = None
         
-        # LLM 客户端（用于重排）
         self.client = OpenAI(api_key=Config.API_KEY, base_url=Config.BASE_URL)
         self.model = Config.MODEL
         
-        # 加载已有数据
         self._load()
     
     # ==================== 持久化 ====================
@@ -89,7 +85,6 @@ class VectorDB:
     # ==================== 分词 ====================
     
     def _tokenize(self, text: str) -> List[str]:
-        """智能分词：中文用jieba，英文用正则"""
         chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
         total_chars = len(re.findall(r'\w', text))
         
@@ -140,7 +135,7 @@ class VectorDB:
         self.metadata = [self.metadata[i] for i in indices_to_keep]
         print(f"🗑️ 已移除同源旧文档: {source_name}")
     
-    # ==================== 检索 ====================
+    # ==================== 检索引擎 ====================
     
     def _vector_search(self, query: str, top_k: int) -> List[Dict]:
         if not self.documents or self.index is None:
@@ -210,24 +205,16 @@ class VectorDB:
         
         return results
     
-    # ==================== 重排 ====================
-    
     def _rerank(self, query: str, candidates: List[Dict], top_k: int = 3) -> List[Dict]:
-        """
-        用LLM对候选结果重排
-        给每个候选打0-10分，按分数排序
-        """
+        """LLM 重排"""
         if not candidates:
             return []
         
-        # 如果候选本来就少，直接返回
         if len(candidates) <= top_k:
             return candidates
         
-        # 构造候选列表
         candidates_text = ""
         for i, c in enumerate(candidates):
-            # 每条截取前200字，避免prompt过长
             content_preview = c['content'][:200].replace('\n', ' ')
             candidates_text += f"\n[{i+1}] 来源: {c['source']}\n内容: {content_preview}\n"
         
@@ -260,7 +247,6 @@ class VectorDB:
             
             content = response.choices[0].message.content.strip()
             
-            # 去掉markdown代码块
             if content.startswith("```"):
                 content = content.split("```")[1]
                 if content.startswith("json"):
@@ -269,15 +255,11 @@ class VectorDB:
             
             scores = json.loads(content)
             
-            # 给候选加分数
             for i, c in enumerate(candidates):
                 key = str(i + 1)
                 c['rerank_score'] = scores.get(key, 0)
             
-            # 按重排分数排序
             candidates.sort(key=lambda x: x.get('rerank_score', 0), reverse=True)
-            
-            # 过滤掉0分的
             candidates = [c for c in candidates if c.get('rerank_score', 0) > 0]
             
             return candidates[:top_k]
@@ -285,31 +267,112 @@ class VectorDB:
         except Exception as e:
             print(f"⚠️ 重排失败，返回原始结果: {e}")
             return candidates[:top_k]
+
+    # ==================== 上下文压缩 ====================
     
-    # ==================== 主检索入口 ====================
-    
-    def search(self, query: str, top_k: int = 3) -> List[Dict]:
-        """检索（混合检索 + 重排）"""
-        if not self.documents:
+    def _compress_context(self, query: str, candidates: List[Dict]) -> List[Dict]:
+        """用LLM提取核心上下文（保留来源，防止废话）"""
+        if not candidates:
             return []
         
-        # 是否启用混合检索
+        candidates_text = ""
+        for i, c in enumerate(candidates):
+            candidates_text += f"\n[片段 {i+1}]\n{c['content']}\n"
+        
+        prompt = f"""你是一个专业的信息提取专家。请从以下检索到的片段中，提取出能够直接回答用户查询的核心信息。
+
+用户查询：{query}
+
+检索到的片段：
+{candidates_text}
+
+提取要求：
+1. 严格过滤掉无关的背景介绍、客套话、参考文献。
+2. 只保留能回答问题的事实、数据或结论。
+3. 必须保留信息的出处标注，如 [片段 1]。
+4. 如果某个片段无法回答该查询，直接忽略该片段，不要提及它。
+5. 即使提取出的内容很短，只要切中要害，也直接输出。
+6. 【绝对禁止】不要输出"无相关内容"、"未找到"、"抱歉"等废话。如果没有提取到任何信息，直接输出空字符串。
+
+提取结果："""
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=800
+            )
+            
+            compressed_content = response.choices[0].message.content.strip()
+            
+            # 如果模型真的没提取出任何东西，降级返回原结果
+            if not compressed_content:
+                print("   ⚠️ 压缩后无有效内容，保留原样")
+                return candidates
+                
+            compressed_candidate = {
+                'content': compressed_content,
+                'source': "综合提炼（原自: " + ", ".join(set(c['source'] for c in candidates)) + "）",
+                'score': candidates[0].get('rerank_score', 0),
+                'rrf_score': candidates[0].get('rrf_score', 0),
+                'rerank_score': candidates[0].get('rerank_score', 0)
+            }
+            
+            return [compressed_candidate]
+            
+        except Exception as e:
+            print(f"⚠️ 上下文压缩失败: {e}")
+            return candidates
+
+    # ==================== 多路召回检索入口 ====================
+    
+    def search_multi_query(self, queries: List[str], top_k: int = 3) -> List[Dict]:
+        """
+        多路查询检索 + 重排 + 压缩
+        """
+        if not self.documents:
+            return []
+            
         if not Config.USE_HYBRID_SEARCH:
-            results = self._vector_search(query, top_k)
+            results = self._vector_search(queries[0], top_k)
             return [
                 {'content': r['content'], 'source': r['source'], 'score': r['vector_score']}
                 for r in results
             ]
         
-        # Step 1: 混合检索
-        print(f"🔀 [混合检索] 向量top-{Config.VECTOR_TOP_K} + BM25 top-{Config.BM25_TOP_K} → RRF融合")
+        all_vector_results = []
+        all_bm25_results = []
         
-        vector_results = self._vector_search(query, Config.VECTOR_TOP_K)
-        bm25_results = self._bm25_search(query, Config.BM25_TOP_K)
+        for q in queries:
+            if not q.strip():
+                continue
+                
+            vec_res = self._vector_search(q, Config.VECTOR_TOP_K)
+            all_vector_results.extend(vec_res)
+            
+            bm25_res = self._bm25_search(q, Config.BM25_TOP_K)
+            all_bm25_results.extend(bm25_res)
         
-        print(f"   向量命中: {len(vector_results)}, BM25命中: {len(bm25_results)}")
+        # 去重（根据 idx 保留最高分）
+        unique_vector = {}
+        for r in all_vector_results:
+            idx = r['idx']
+            if idx not in unique_vector or r['vector_score'] > unique_vector[idx]['vector_score']:
+                unique_vector[idx] = r
+                
+        unique_bm25 = {}
+        for r in all_bm25_results:
+            idx = r['idx']
+            if idx not in unique_bm25 or r['bm25_score'] > unique_bm25[idx]['bm25_score']:
+                unique_bm25[idx] = r
+                
+        vector_results = list(unique_vector.values())
+        bm25_results = list(unique_bm25.values())
         
-        # Step 2: RRF融合（多取一些作为重排候选）
+        print(f"🔀 [多路检索] 合并后：向量候选 {len(vector_results)} 条，BM25候选 {len(bm25_results)} 条")
+        
+        # RRF融合
         candidates = self._rrf_fusion(
             vector_results, 
             bm25_results, 
@@ -318,28 +381,31 @@ class VectorDB:
         
         print(f"   RRF融合后候选: {len(candidates)} 条")
         
-        # Step 3: 重排
+        # 重排
         if Config.USE_RERANK and len(candidates) > 1:
             print(f"🎯 [重排] LLM打分中...")
-            candidates = self._rerank(query, candidates, top_k)
+            candidates = self._rerank(queries[0], candidates, top_k)
             print(f"   重排后保留: {len(candidates)} 条")
         else:
             candidates = candidates[:top_k]
-        
-        # 返回
+            
+        # 全局浓缩（上下文压缩）
+        if Config.USE_COMPRESSION and len(candidates) > 0:
+            print(f"🗜️ [压缩] 提取核心上下文...")
+            candidates = self._compress_context(queries[0], candidates)
+            print(f"   压缩后保留: {len(candidates)} 条")
+            
         return [
             {
                 'content': r['content'],
                 'source': r['source'],
                 'score': r.get('rerank_score', r.get('rrf_score', 0)),
                 'rrf_score': r.get('rrf_score', 0),
-                'rerank_score': r.get('rerank_score', 0),
-                'vector_score': r.get('vector_score', 0),
-                'bm25_score': r.get('bm25_score', 0)
+                'rerank_score': r.get('rerank_score', 0)
             }
             for r in candidates
         ]
-    
+
     # ==================== 语义分块 ====================
     
     def _split_by_semantic(self, text: str, max_chunk_size: int = None) -> List[str]:
@@ -499,7 +565,9 @@ class VectorDB:
             "向量维度": self.embeddings.shape[1] if self.embeddings is not None else 0,
             "文档源数量": len(set(m.get("source", "unknown") for m in self.metadata)),
             "混合检索": "开启" if Config.USE_HYBRID_SEARCH else "关闭",
-            "重排": "开启" if Config.USE_RERANK else "关闭"
+            "重排": "开启" if Config.USE_RERANK else "关闭",
+            "多路召回": "开启",
+            "上下文压缩": "开启" if Config.USE_COMPRESSION else "关闭"
         }
     
     def clear(self):
