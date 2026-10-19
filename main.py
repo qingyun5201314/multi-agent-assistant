@@ -1,12 +1,13 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Any
 import uvicorn
 import os
+import json
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,11 +15,7 @@ load_dotenv()
 from agent import Agent
 from config import Config
 
-app = FastAPI(
-    title="多功能AI助手",
-    description="RAG + Agent + 记忆 + 多会话",
-    version="1.2.0"
-)
+app = FastAPI(title="多功能AI助手", version="1.3.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,8 +27,6 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 agent = Agent()
-
-# ==================== 请求/响应模型 ====================
 
 class ChatRequest(BaseModel):
     query: str
@@ -59,8 +54,6 @@ class LoadRequest(BaseModel):
 class SessionRequest(BaseModel):
     session_id: str
 
-# ==================== 接口 ====================
-
 @app.get("/")
 async def index():
     return FileResponse("static/index.html")
@@ -69,134 +62,103 @@ async def index():
 async def health():
     return {"status": "ok"}
 
+# ==================== 流式聊天接口 ====================
+
+@app.get("/chat_stream")
+async def chat_stream(
+    query: str = Query(...),
+    session_id: str = Query("default"),
+    max_steps: int = Query(5)
+):
+    agent.max_steps = max_steps
+    async def event_generator():
+        try:
+            async for event in agent.run_stream(query, session_id=session_id):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0)
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no" # 强制关闭 Nginx 等代理的缓冲
+        }
+    )
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     try:
-        agent.max_steps = request.max_steps
-        result = await agent.run(request.query, session_id=request.session_id)
-        
-        return ChatResponse(
-            success=True,
-            answer=result["answer"],
-            steps=result["steps"],
-            session_id=result["session_id"]
-        )
+        full_text = ""
+        steps = []
+        async for event in agent.run_stream(request.query, session_id=request.session_id):
+            if event["type"] == "text":
+                full_text += event["content"]
+            elif event["type"] == "final":
+                steps = event.get("steps", [])
+        return ChatResponse(success=True, answer=full_text, steps=steps, session_id=request.session_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== 多会话管理 ====================
+# ==================== 其他管理接口 ====================
 
 @app.get("/sessions")
-async def list_sessions():
-    """获取所有会话列表"""
-    return {"sessions": agent.get_all_sessions()}
+async def list_sessions(): return {"sessions": agent.get_all_sessions()}
 
 @app.get("/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str):
-    """获取某个会话的所有消息"""
-    return {"messages": agent.get_session_messages(session_id)}
+async def get_session_messages(session_id: str): return {"messages": agent.get_session_messages(session_id)}
 
 @app.post("/sessions/clear")
 async def clear_session(request: SessionRequest):
-    """清空某个会话的消息（保留会话）"""
     agent.clear_session(request.session_id)
-    return {"success": True, "message": f"会话 {request.session_id} 已清空"}
+    return {"success": True, "message": "会话已清空"}
 
 @app.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
-    """删除某个会话"""
     agent.delete_session(session_id)
-    return {"success": True, "message": f"会话 {session_id} 已删除"}
-
-# ==================== 记忆管理 ====================
-
-@app.get("/memory/stats")
-async def memory_stats():
-    return agent.get_memory_stats()
-
-@app.get("/memory/all")
-async def all_memories():
-    return {"memories": agent.get_all_memories()}
-
-@app.delete("/memory/clear")
-async def clear_long_term_memory():
-    agent.clear_long_term_memory()
-    return {"success": True, "message": "长期记忆已清空"}
-
-# ==================== 知识库管理 ====================
+    return {"success": True, "message": "会话已删除"}
 
 @app.post("/knowledge/load")
 async def load_knowledge(request: LoadRequest):
     success = agent.load_knowledge(request.filepath)
-    if success:
-        return {"success": True, "message": f"已加载: {request.filepath}"}
-    else:
+    if success: return {"success": True, "message": "已加载"}
+    raise HTTPException(status_code=400, detail="加载失败")
+
+@app.post("/knowledge/upload")
+async def upload_knowledge(file: UploadFile = File(...)):
+    try:
+        allowed_ext = ['.txt', '.md', '.markdown', '.pdf']
+        ext = os.path.splitext(file.filename)[1].lower()
+        if ext not in allowed_ext:
+            raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
+        
+        content = await file.read()
+        success = agent.vector_db.load_from_bytes(content, file.filename)
+        
+        if success: return {"success": True, "message": "已上传", "stats": agent.vector_db.get_stats()}
         raise HTTPException(status_code=400, detail="加载失败")
+    except HTTPException: raise
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/knowledge/sources")
+async def knowledge_sources(): return {"sources": agent.vector_db.get_sources()}
 
 @app.get("/knowledge/stats")
-async def knowledge_stats():
-    return agent.vector_db.get_stats()
+async def knowledge_stats(): return agent.vector_db.get_stats()
 
 @app.delete("/knowledge/clear")
 async def clear_knowledge():
     agent.vector_db.clear()
     return {"success": True, "message": "知识库已清空"}
 
-@app.post("/knowledge/upload")
-async def upload_knowledge(file: UploadFile = File(...)):
-    """上传文档到知识库"""
-    try:
-        # 检查文件类型
-        allowed_ext = ['.txt', '.md', '.markdown', '.pdf']
-        ext = os.path.splitext(file.filename)[1].lower()
-        
-        if ext not in allowed_ext:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"不支持的文件格式: {ext}，仅支持 {allowed_ext}"
-            )
-        
-        # 读取文件内容
-        content = await file.read()
-        
-        # 加载到知识库
-        success = agent.vector_db.load_from_bytes(content, file.filename)
-        
-        if success:
-            stats = agent.vector_db.get_stats()
-            return {
-                "success": True,
-                "message": f"已上传: {file.filename}",
-                "stats": stats
-            }
-        else:
-            raise HTTPException(status_code=400, detail="加载失败")
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/knowledge/sources")
-async def knowledge_sources():
-    """获取已加载的文档源"""
-    return {"sources": agent.vector_db.get_sources()}
-
-# ==================== 启动 ====================
+@app.get("/memory/stats")
+async def memory_stats(): return agent.get_memory_stats()
 
 if __name__ == "__main__":
-    if os.path.exists("knowledge.txt"):
-        agent.load_knowledge("knowledge.txt")
-    
     print(f"\n🚀 服务启动中...")
-    print(f"   网页: http://localhost:{Config.PORT}")
-    print(f"   文档: http://localhost:{Config.PORT}/docs")
+    print(f"   请在浏览器访问: http://localhost:{Config.PORT}")
     print(f"   按 Ctrl+C 停止\n")
-    
-    uvicorn.run(
-        app,
-        host=Config.HOST,
-        port=Config.PORT,
-        log_level="info"
-    )
+    uvicorn.run(app, host=Config.HOST, port=Config.PORT, log_level="info")
