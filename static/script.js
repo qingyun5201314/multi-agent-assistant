@@ -10,11 +10,113 @@ const sessionList = document.getElementById('sessionList');
 const newChatBtn = document.getElementById('newChatBtn');
 const uploadBtn = document.getElementById('uploadBtn');
 const fileInput = document.getElementById('fileInput');
+const micBtn = document.getElementById('micBtn');
+const speakerBtn = document.getElementById('speakerBtn');
 
 let currentSessionId = null;
+let isSpeakerOn = true; // 语音播报开关，默认开启
+let currentAudio = null;
 
 function generateSessionId() {
     return 'sess_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+// ==================== 语音播报逻辑 ====================
+if (speakerBtn) {
+    speakerBtn.addEventListener('click', () => {
+        isSpeakerOn = !isSpeakerOn;
+        speakerBtn.textContent = isSpeakerOn ? '🔊' : '🔇';
+        if (!isSpeakerOn && currentAudio) {
+            currentAudio.pause();
+            currentAudio = null;
+        }
+    });
+}
+
+async function playTTS(text) {
+    if (!isSpeakerOn) return;
+    if (currentAudio) {
+        currentAudio.pause();
+        currentAudio = null;
+    }
+    
+    try {
+        // 去除 Markdown 和长换行，防止读出奇怪符号，并截取前200字
+        const cleanText = text.replace(/[*#`]/g, '').replace(/\n/g, '，').slice(0, 200);
+        const response = await fetch(`${API_BASE}/tts?text=${encodeURIComponent(cleanText)}`);
+        if (!response.ok) throw new Error('TTS 请求失败');
+        
+        const audioBlob = await response.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+        
+        currentAudio = new Audio(audioUrl);
+        currentAudio.play();
+    } catch (error) { console.error('语音播报失败:', error); }
+}
+
+// ==================== 语音输入逻辑 ====================
+let mediaRecorder;
+let audioChunks = [];
+let isRecording = false;
+
+if (micBtn) {
+    micBtn.addEventListener('mousedown', startRecording);
+    micBtn.addEventListener('mouseup', stopRecording);
+    micBtn.addEventListener('mouseleave', stopRecording);
+}
+
+async function startRecording() {
+    if (isRecording) return;
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        audioChunks = [];
+
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) audioChunks.push(event.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            const formData = new FormData();
+            formData.append('file', audioBlob, 'record.webm');
+
+            micBtn.textContent = '⏳';
+            micBtn.classList.remove('recording');
+            isRecording = false;
+
+            try {
+                const response = await fetch(`${API_BASE}/transcribe`, { method: 'POST', body: formData });
+                const data = await response.json();
+                
+                if (data.success && data.text) {
+                    userInput.value = data.text;
+                    userInput.focus();
+                } else {
+                    alert('语音识别失败: ' + data.error);
+                }
+            } catch (error) {
+                alert('语音识别网络请求失败');
+            } finally {
+                micBtn.textContent = '🎤';
+                stream.getTracks().forEach(track => track.stop());
+            }
+        };
+
+        mediaRecorder.start();
+        isRecording = true;
+        micBtn.textContent = '🟥';
+        micBtn.classList.add('recording');
+    } catch (error) {
+        console.error("无法访问麦克风:", error);
+        alert("无法访问麦克风，请确保浏览器允许录音权限。");
+    }
+}
+
+function stopRecording() {
+    if (mediaRecorder && isRecording) {
+        mediaRecorder.stop();
+    }
 }
 
 // ==================== 会话管理 ====================
@@ -74,7 +176,7 @@ async function deleteSession(sessionId) {
     } catch (error) { console.error('删除失败:', error); }
 }
 
-// ==================== 发送消息（完美 EventSource 版） ====================
+// ==================== 发送消息（流式+语音） ====================
 async function sendMessage() {
     const query = userInput.value.trim();
     if (!query) return;
@@ -99,11 +201,8 @@ async function sendMessage() {
     let isFirstText = true;
     let textContainer = null;
 
-    // 构建 GET 请求的 URL
     const maxSteps = parseInt(maxStepsInput.value) || 5;
     const url = `${API_BASE}/chat_stream?query=${encodeURIComponent(query)}&session_id=${currentSessionId}&max_steps=${maxSteps}`;
-
-    // 使用 EventSource (浏览器原生 SSE)
     const eventSource = new EventSource(url);
 
     eventSource.onmessage = (event) => {
@@ -118,13 +217,12 @@ async function sendMessage() {
             } 
             else if (data.type === 'text') {
                 if (isFirstText) {
-                    msgEl.innerHTML = ''; // 清空 loading
+                    msgEl.innerHTML = ''; 
                     textContainer = document.createElement('div');
                     textContainer.style.whiteSpace = 'pre-wrap';
                     msgEl.appendChild(textContainer);
                     isFirstText = false;
                 }
-                
                 fullText += data.content;
                 textContainer.textContent = fullText;
                 chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -135,6 +233,9 @@ async function sendMessage() {
                 }
                 loadSessionList();
                 eventSource.close(); 
+                
+                // 触发语音播报
+                if (fullText) playTTS(fullText);
             } 
             else if (data.type === 'error') {
                 msgEl.textContent = `❌ 后端报错: ${data.content}`;
@@ -147,13 +248,10 @@ async function sendMessage() {
 
     eventSource.onerror = (error) => {
         console.error("EventSource 错误:", error);
-        if (isFirstText) {
-            msgEl.textContent = `❌ 连接中断，请检查后端或代理软件`;
-        }
+        if (isFirstText) msgEl.textContent = `❌ 连接中断，请检查后端或代理软件`;
         eventSource.close();
     };
 
-    // 恢复按钮状态
     const originalClose = eventSource.close.bind(eventSource);
     eventSource.close = () => {
         sendBtn.disabled = false;

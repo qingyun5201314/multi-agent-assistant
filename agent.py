@@ -2,15 +2,22 @@ import json
 import asyncio
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
+from langfuse import Langfuse
 from vector_db import VectorDB
 from tools import Tools
 from config import Config
 from database import Database
 from long_term_memory import LongTermMemory
 
+# 直接实例化，并显式传入密钥，避免因环境变量读取失败导致 Tracer 为 None
+langfuse = Langfuse(
+    public_key=Config.LANGFUSE_PUBLIC_KEY,
+    secret_key=Config.LANGFUSE_SECRET_KEY,
+    host="https://cloud.langfuse.com"
+)
 
 class Agent:
-    """ReAct Agent（极致流式 + 全接口兼容版）"""
+    """ReAct Agent（极致流式 + Langfuse 监控）"""
     
     MAX_MESSAGES_BEFORE_SUMMARY = 20
     KEEP_RECENT_MESSAGES = 10
@@ -46,10 +53,9 @@ class Agent:
 直接回答：FINAL: 你的回答
 """
     
-    # ==================== 基础接口（补齐的） ====================
+    # ==================== 基础接口 ====================
     
     def load_knowledge(self, filepath: str) -> bool:
-        """加载知识库（供 main.py 调用）"""
         return self.vector_db.load_from_file(filepath)
     
     def get_all_sessions(self) -> List[Dict]:
@@ -152,62 +158,87 @@ class Agent:
         )
         return response.choices[0].message.content
     
-    # ==================== 流式输出核心 ====================
+    # ==================== 流式输出与监控 ====================
     
     async def run_stream(self, user_input: str, session_id: str = "default"):
-        """极致流式运行Agent"""
-        is_first_message = self.db.get_message_count(session_id) == 0
-        self.db.add_message(session_id, "user", user_input)
+        """极致流式运行Agent（带 Langfuse 监控）"""
         
-        if is_first_message:
-            title = self._generate_title(user_input)
-            self.db.set_session_title(session_id, title)
-            yield {"type": "title", "content": title}
-        
-        self._maybe_summarize(session_id)
-        
-        history = []
-        steps_log = []
-        
-        for step in range(self.max_steps):
-            decision = self.think(user_input, session_id, history)
+        # 使用 start_as_current_observation 兼容新版 SDK
+        with langfuse.start_as_current_observation(
+            name="chat_session", 
+            as_type="span",
+            input=user_input
+        ) as root_span:
             
-            if "FINAL:" in decision:
-                steps_log.append({"step": step + 1, "action": "final", "content": decision.split("FINAL:")[-1].strip()})
-                break
-            
-            elif "TOOL:" in decision:
-                tool_line = decision.split("TOOL:")[-1].strip()
-                if "(" in tool_line and ")" in tool_line:
-                    tool_name = tool_line.split("(")[0].strip()
-                    args = tool_line.split("(")[1].split(")")[0].strip()
-                    
-                    yield {"type": "status", "content": f"正在执行 {tool_name}..."}
-                    
-                    if tool_name == "search_knowledge":
-                        rewritten = self._rewrite_query(args)
-                        yield {"type": "status", "content": f"改写查询: {rewritten}"}
-                        result = await self.tools.execute(tool_name, [args, rewritten])
-                    else:
-                        result = await self.tools.execute(tool_name, args)
-                    
-                    history.append({"step": step + 1, "tool": tool_name, "args": args, "result": result})
-                    steps_log.append({"step": step + 1, "action": "tool", "tool": tool_name, "args": args, "result": result})
-                    
-                    yield {"type": "tool_result", "tool": tool_name, "result": result}
-            else:
-                steps_log.append({"step": step + 1, "action": "final", "content": decision})
-                break
-        
-        # ================= 最终强制流式生成阶段 =================
-        context = self._build_context(user_input, session_id)
-        
-        tool_context = ""
-        if history:
-            tool_context = "【刚刚查询到的资料】\n" + "\n".join([f"工具 {h['tool']} 返回: {json.dumps(h['result'], ensure_ascii=False)}" for h in history])
+            # 更新 Trace 级别的 session_id（如果 SDK 支持的话，不支持就忽略）
+            try:
+                root_span.update_trace(session_id=session_id)
+            except Exception:
+                pass
 
-        final_prompt = f"""你是一个多功能AI助手。
-        
+            is_first_message = self.db.get_message_count(session_id) == 0
+            self.db.add_message(session_id, "user", user_input)
+            
+            if is_first_message:
+                title = self._generate_title(user_input)
+                self.db.set_session_title(session_id, title)
+                yield {"type": "title", "content": title}
+            
+            self._maybe_summarize(session_id)
+            
+            history = []
+            steps_log = []
+            
+            for step in range(self.max_steps):
+                # 记录“思考”这一步
+                with root_span.start_as_current_observation(
+                    name=f"think_step_{step+1}", 
+                    as_type="span"
+                ) as think_span:
+                    decision = self.think(user_input, session_id, history)
+                    think_span.update(output=decision[:100])
+                
+                if "FINAL:" in decision:
+                    steps_log.append({"step": step + 1, "action": "final", "content": decision.split("FINAL:")[-1].strip()})
+                    break
+                
+                elif "TOOL:" in decision:
+                    tool_line = decision.split("TOOL:")[-1].strip()
+                    if "(" in tool_line and ")" in tool_line:
+                        tool_name = tool_line.split("(")[0].strip()
+                        args = tool_line.split("(")[1].split(")")[0].strip()
+                        
+                        yield {"type": "status", "content": f"正在执行 {tool_name}..."}
+                        
+                        # 记录“工具执行”这一步
+                        with root_span.start_as_current_observation(
+                            name=f"tool_{tool_name}", 
+                            as_type="span"
+                        ) as tool_span:
+                            if tool_name == "search_knowledge":
+                                rewritten = self._rewrite_query(args)
+                                yield {"type": "status", "content": f"改写查询: {rewritten}"}
+                                result = await self.tools.execute(tool_name, [args, rewritten])
+                            else:
+                                result = await self.tools.execute(tool_name, args)
+                            tool_span.update(output=json.dumps(result, ensure_ascii=False)[:200])
+                        
+                        history.append({"step": step + 1, "tool": tool_name, "args": args, "result": result})
+                        steps_log.append({"step": step + 1, "action": "tool", "tool": tool_name, "args": args, "result": result})
+                        
+                        yield {"type": "tool_result", "tool": tool_name, "result": result}
+                else:
+                    steps_log.append({"step": step + 1, "action": "final", "content": decision})
+                    break
+            
+            # ================= 最终强制流式生成阶段 =================
+            context = self._build_context(user_input, session_id)
+            tool_context = ""
+            if history:
+                tool_context = "【刚刚查询到的资料】\n" + "\n".join([f"工具 {h['tool']} 返回: {json.dumps(h['result'], ensure_ascii=False)}" for h in history])
+
+            final_prompt = f"""你是一个多功能AI助手。
+            
 {context}
 
 {tool_context}
@@ -216,32 +247,40 @@ class Agent:
 
 请结合上述所有信息，直接回答用户。不要输出"FINAL:"等多余字符。"""
 
-        print("\n--- 开始请求大模型流式输出 ---")
-        # 发起真正的流式请求
-        response = self.client.chat.completions.create(
-            model=self.model, 
-            messages=[{"role": "user", "content": final_prompt}],
-            temperature=Config.TEMPERATURE, 
-            max_tokens=1000, 
-            stream=True
-        )
-        
-        final_answer = ""
-        for chunk in response:
-            if chunk.choices[0].delta.content:
-                text = chunk.choices[0].delta.content
-                final_answer += text
-                print(f"收到字: [{text}]")
-                # 每次发一个字符，极致打字机效果
-                yield {"type": "text", "content": text}
-        print("--- 大模型流式输出完毕 ---\n")
-        
-        # 存储记忆
-        self.db.add_message(session_id, "assistant", final_answer)
-        judgment = self.ltm.should_store(user_input, final_answer)
-        if judgment.get("should_store"):
-            if judgment.get("memory"):
-                self.ltm.add_memory(judgment.get("memory"), session_id)
-        
-        # 通知前端结束
-        yield {"type": "final", "steps": steps_log, "session_id": session_id}
+            # 记录“大模型生成”这一步
+            with root_span.start_as_current_observation(
+                name="final_llm_generation",
+                as_type="generation",
+                model=self.model,
+                input=final_prompt,
+            ) as generation:
+                
+                response = self.client.chat.completions.create(
+                    model=self.model, 
+                    messages=[{"role": "user", "content": final_prompt}],
+                    temperature=Config.TEMPERATURE, 
+                    max_tokens=1000, 
+                    stream=True
+                )
+                
+                final_answer = ""
+                for chunk in response:
+                    if chunk.choices[0].delta.content:
+                        text = chunk.choices[0].delta.content
+                        final_answer += text
+                        yield {"type": "text", "content": text}
+                
+                generation.update(output=final_answer)
+            
+            # 存储记忆
+            self.db.add_message(session_id, "assistant", final_answer)
+            judgment = self.ltm.should_store(user_input, final_answer)
+            if judgment.get("should_store"):
+                if judgment.get("memory"):
+                    self.ltm.add_memory(judgment.get("memory"), session_id)
+            
+            # 通知前端结束
+            yield {"type": "final", "steps": steps_log, "session_id": session_id}
+            
+            # 设置 Trace 级别的输出
+            root_span.update(output=final_answer)

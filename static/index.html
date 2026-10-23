@@ -8,61 +8,38 @@
 </head>
 <body>
     <div class="app">
-        <!-- 左侧栏 -->
         <aside class="sidebar">
-            <div class="logo">
-                <h1>🤖 AI助手</h1>
-            </div>
-            
-            <!-- 新对话按钮 -->
+            <div class="logo"><h1>🤖 AI助手</h1></div>
             <button id="newChatBtn" class="btn-new-chat">+ 新对话</button>
-            
-            <!-- 会话列表 -->
-            <div id="sessionList" class="session-list">
-                <!-- JS动态填充 -->
-            </div>
-            
-            <!-- 底部设置 -->
+            <div id="sessionList" class="session-list"></div>
             <div class="sidebar-footer">
                 <div class="panel">
                     <h3>📚 知识库</h3>
                     <button id="loadKnowledge" class="btn">加载 knowledge.txt</button>
                     <input type="file" id="fileInput" accept=".txt,.md,.markdown,.pdf" style="display:none">
                     <button id="uploadBtn" class="btn" style="margin-top:8px;">📎 上传文档</button>
-    <div id="knowledgeStats" class="stats">未加载</div>
+                    <div id="knowledgeStats" class="stats">未加载</div>
                 </div>
-                
                 <div class="panel">
                     <h3>⚙️ 设置</h3>
-                    <label>
-                        最大步数
-                        <input type="number" id="maxSteps" value="5" min="1" max="10">
-                    </label>
+                    <label>最大步数 <input type="number" id="maxSteps" value="5" min="1" max="10"></label>
                 </div>
             </div>
         </aside>
         
-        <!-- 主聊天区 -->
         <main class="chat-area">
             <div id="chatMessages" class="messages">
                 <div class="welcome">
                     <h2>👋 你好！我是多功能AI助手</h2>
-                    <p>我可以：</p>
-                    <ul>
-                        <li>📚 基于知识库回答问题（RAG）</li>
-                        <li>🌤️ 查询实时天气</li>
-                        <li>🧮 进行数学计算</li>
-                        <li>⏰ 查询时间</li>
-                        <li>🔍 搜索互联网信息</li>
-                        <li>🎨 生成图像</li>
-                    </ul>
-                    <p>直接在下方输入问题开始吧！</p>
+                    <p>支持语音对话、RAG问答、图像生成、联网搜索等。</p>
                 </div>
             </div>
             
             <div class="input-area">
+                <button id="micBtn" class="btn btn-mic" title="按住说话">🎤</button>
                 <textarea id="userInput" placeholder="输入你的问题...（按 Enter 发送，Shift+Enter 换行）"></textarea>
                 <button id="sendBtn" class="btn btn-send">发送</button>
+                <button id="speakerBtn" class="btn btn-mic" title="开启/关闭语音播报" style="margin-left: 10px;">🔊</button>
             </div>
         </main>
     </div>

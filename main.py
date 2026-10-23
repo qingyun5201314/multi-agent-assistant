@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
@@ -8,6 +8,9 @@ import uvicorn
 import os
 import json
 import asyncio
+import tempfile
+import edge_tts
+from faster_whisper import WhisperModel
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,7 +18,7 @@ load_dotenv()
 from agent import Agent
 from config import Config
 
-app = FastAPI(title="多功能AI助手", version="1.3.1")
+app = FastAPI(title="多功能AI助手", version="1.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,6 +30,18 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 agent = Agent()
+
+# ==================== 加载本地 Whisper 模型 ====================
+print("🎙️ 正在加载本地 Whisper 模型...")
+try:
+    # 自动检测是否有 GPU，如果没有则会降级到 CPU
+    whisper_model = WhisperModel("base", device="cuda", compute_type="float16")
+except Exception:
+    print("⚠️ GPU 加载失败，尝试使用 CPU 运行 Whisper...")
+    whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+print("✅ Whisper 模型加载完毕！")
+
+# ==================== 数据模型 ====================
 
 class ChatRequest(BaseModel):
     query: str
@@ -54,6 +69,8 @@ class LoadRequest(BaseModel):
 class SessionRequest(BaseModel):
     session_id: str
 
+# ==================== 基础接口 ====================
+
 @app.get("/")
 async def index():
     return FileResponse("static/index.html")
@@ -61,6 +78,44 @@ async def index():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+# ==================== 语音识别 (STT) ====================
+
+@app.post("/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """接收音频文件，返回识别出的文字"""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_audio:
+            temp_audio.write(await file.read())
+            temp_path = temp_audio.name
+        
+        # 执行识别
+        segments, info = whisper_model.transcribe(temp_path, beam_size=5, language="zh")
+        text = "".join([segment.text for segment in segments]).strip()
+        
+        os.remove(temp_path)
+        return {"success": True, "text": text}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+# ==================== 语音合成 (TTS) ====================
+
+@app.get("/tts")
+async def text_to_speech(text: str = Query(...)):
+    """接收文字，返回合成的音频流"""
+    try:
+        # 使用微软 Edge 免费语音库，晓晓（女）
+        voice = "zh-CN-XiaoxiaoNeural"
+        communicate = edge_tts.Communicate(text, voice)
+        
+        audio_data = b""
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data += chunk["data"]
+                
+        return Response(content=audio_data, media_type="audio/mpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ==================== 流式聊天接口 ====================
 
@@ -75,7 +130,7 @@ async def chat_stream(
         try:
             async for event in agent.run_stream(query, session_id=session_id):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0)
+                await asyncio.sleep(0) # 强制刷新缓冲
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
     
@@ -85,12 +140,13 @@ async def chat_stream(
         headers={
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no" # 强制关闭 Nginx 等代理的缓冲
+            "X-Accel-Buffering": "no" 
         }
     )
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    """非流式兼容接口"""
     try:
         full_text = ""
         steps = []
@@ -103,7 +159,7 @@ async def chat(request: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== 其他管理接口 ====================
+# ==================== 会话与知识库管理 ====================
 
 @app.get("/sessions")
 async def list_sessions(): return {"sessions": agent.get_all_sessions()}
@@ -156,6 +212,8 @@ async def clear_knowledge():
 
 @app.get("/memory/stats")
 async def memory_stats(): return agent.get_memory_stats()
+
+# ==================== 启动 ====================
 
 if __name__ == "__main__":
     print(f"\n🚀 服务启动中...")

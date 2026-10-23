@@ -13,6 +13,8 @@ class Config:
     MODEL = os.getenv("OPENAI_MODEL", "deepseek-chat")
     MODELSCOPE_TOKEN = os.getenv("MODELSCOPE_TOKEN", "")
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+    LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")
     
     # 启动时校验
     if not API_KEY:
